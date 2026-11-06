@@ -17,7 +17,7 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $apk = Join-Path $repo "Builds\QuestRealityCapture-live.apk"
 $log = Join-Path $repo "Builds\build.log"
-$package = "com.t34400.QuestRealityCapture"
+$package = "com.arulrajesh.QuestRealityCaptureLive"  # installs beside the stock com.t34400 app (different signature)
 
 if (-not $SkipBuild) {
     if (-not $Unity) {

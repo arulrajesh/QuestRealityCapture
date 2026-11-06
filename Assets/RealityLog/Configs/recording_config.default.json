@@ -86,7 +86,7 @@
     "overlayOpacity": 0.45,
     "colorMinTranslationM": 0.03,
     "colorMinRotationDeg": 3.0,
-    "colorMaxFps": 5.0,
+    "colorMaxFps": 10.0,
     "colorMaxIntervalS": 1.5,
     "maxAngularSpeedDps": 150.0
   }

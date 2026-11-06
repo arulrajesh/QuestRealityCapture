@@ -28,7 +28,7 @@ namespace RealityLog.Streaming
         // Headset-side color gate (the laptop's Kalman selection decides what is finally kept).
         public float colorMinTranslationM = 0.03f;
         public float colorMinRotationDeg = 3f;
-        public float colorMaxFps = 5f;
+        public float colorMaxFps = 10f;  // stereo pairs per second; splats need many views (laptop compaction keeps the sharpest per 0.25 s)
         public float colorMaxIntervalS = 1.5f;
         public float maxAngularSpeedDps = 150f;
     }
