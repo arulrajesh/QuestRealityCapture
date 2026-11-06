@@ -12,6 +12,8 @@ namespace RealityLog.Recording
         public DepthConfig depth = new();
         public PoseConfig pose = new();
         public LiveFeedbackConfig liveFeedback = new();
+        /// <summary>Live streaming to the MQ3DRecon laptop receiver (metaquest-3d-reconstruction specs/LIVE_STREAMING.md).</summary>
+        public RealityLog.Streaming.LiveStreamSettings streaming = new();
 
         public static class CameraBackend
         {

@@ -61,6 +61,51 @@ namespace RealityLog
             RequestGPUReadbackAndSave(rightEyeBuffer, rightDepthOutputPath);
         }
 
+        /// <summary>
+        /// Same GPU copy as <see cref="Export"/>, but hands both eyes' NDC floats to <paramref name="onReady"/>
+        /// (main thread) instead of writing files. The data is copied inside the readback callback, while valid.
+        /// </summary>
+        public void ExportToCallback(RenderTexture sourceRT, Action<float[], float[]> onReady)
+        {
+            if (isDisposed || sourceRT == null || !sourceRT.IsCreated())
+            {
+                return;
+            }
+
+            var pixelCount = sourceRT.width * sourceRT.height;
+            var leftEyeBuffer = GetOrCreateBuffer(pixelCount);
+            var rightEyeBuffer = GetOrCreateBuffer(pixelCount);
+            computeShader.SetTexture(kernel, "InputTex", sourceRT);
+            computeShader.SetBuffer(kernel, "LeftEyeDepth", leftEyeBuffer);
+            computeShader.SetBuffer(kernel, "RightEyeDepth", rightEyeBuffer);
+            computeShader.SetInt("_Width", sourceRT.width);
+            computeShader.SetInt("_Height", sourceRT.height);
+            computeShader.Dispatch(kernel, Mathf.CeilToInt(sourceRT.width / 8f), Mathf.CeilToInt(sourceRT.height / 8f), 1);
+
+            float[]? left = null;
+            float[]? right = null;
+            void Complete()
+            {
+                if (left != null && right != null)
+                {
+                    onReady(left, right);
+                }
+            }
+
+            AsyncGPUReadback.Request(leftEyeBuffer, request =>
+            {
+                if (!request.hasError) left = request.GetData<float>().ToArray();
+                ReturnBuffer(leftEyeBuffer);
+                Complete();
+            });
+            AsyncGPUReadback.Request(rightEyeBuffer, request =>
+            {
+                if (!request.hasError) right = request.GetData<float>().ToArray();
+                ReturnBuffer(rightEyeBuffer);
+                Complete();
+            });
+        }
+
         public void Dispose()
         {
             isDisposed = true;

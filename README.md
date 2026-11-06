@@ -372,6 +372,61 @@ adb push recording_config.json /sdcard/Android/data/com.t34400.QuestRealityCaptu
 
 ---
 
+## 📡 Live Streaming to a Laptop (fork: `feature/live-streaming`)
+
+This fork can stream capture data live to a laptop running
+[`mq3drecon live`](https://github.com/arulrajesh/metaquest-3d-reconstruction/tree/feature/live-streaming-reconstruction).
+The laptop records the session (the master copy), builds a 3D model on its GPU,
+and sends live feedback back to the headset. There is no copy step: when you
+stop recording, the laptop already has everything.
+
+**What is streamed.**
+
+* **Color:** MRUK stereo color as JPEG. Only after real head motion (about 3 cm or 3°), at most 5 fps, and never during very fast turns.
+* **Depth:** Depth API NDC frames for both eyes, as 16-bit (`u16_ndc`).
+* **Control:** heartbeats and session start/end.
+
+**What comes back.**
+
+* **Keyframe markers:** a small frustum wherever the laptop kept a keyframe, plus a "KEYFRAME ✓" flash.
+* **Surface overlay:** the generated surfaces, colored by confidence (red = needs more looking, green = solid).
+* **Status HUD:** keyframes, covered surface area, and link health.
+
+**Connecting** happens automatically, in this order:
+
+1. `live_stream_endpoint.json`, which the laptop pushes over adb;
+2. `127.0.0.1` through `adb reverse`;
+3. a UDP discovery probe on port 9871.
+
+The headset and laptop must be on the same Wi-Fi. The frames themselves never travel over adb.
+
+**Boundaryless.** The app declares `com.oculus.feature.BOUNDARYLESS_APP`, so it does not ask for a Guardian boundary. That matters for large spaces and outdoors.
+
+**Configuration** lives in the `streaming` block of `recording_config.json`. Push an override to `/sdcard/Android/data/com.t34400.QuestRealityCapture/files/recording_config.json`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Stream to the laptop |
+| `host`, `port` | `""`, `9870` | Fixed laptop address (empty: automatic) |
+| `recordOnHeadset` | `false` | Also write raw files on the headset |
+| `jpegQuality` | `90` | Color JPEG quality |
+| `jpegRowOrder` | `top_down` | Set to `bottom_up` if the laptop shows images upside down |
+| `overlayMode` | `confidence` | `confidence` or `color` |
+| `colorMaxFps`, `colorMinTranslationM`, `colorMinRotationDeg` | `5`, `0.03`, `3` | Headset-side color gate |
+
+**Status: not yet built or run.** The C# was written without a Unity install.
+
+* **Checked:**
+  * The streaming code (`Assets/RealityLog/Scripts/Runtime/Streaming/`) compiles as C# 9 against stand-in Unity types.
+  * Its wire format was cross-checked against the laptop implementation in both directions.
+* **Still to verify on device:**
+  * the recorder and controller hooks;
+  * the overlay shader;
+  * JPEG encoding off the main thread;
+  * the JPEG row order.
+
+---
+
 ## 🚀 Installation & Usage
 
 1. Download the APK from [GitHub Releases](https://github.com/t-34400/QuestRealityCapture/releases)

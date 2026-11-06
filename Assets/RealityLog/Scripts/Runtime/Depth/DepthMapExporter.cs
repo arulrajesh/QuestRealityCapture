@@ -3,6 +3,7 @@
 using System;
 using System.IO;
 using RealityLog.Recording;
+using RealityLog.Streaming;
 using UnityEngine;
 
 namespace RealityLog.Depth
@@ -44,6 +45,11 @@ namespace RealityLog.Depth
 
         private bool isExporting = false;
 
+        /// <summary>False while streaming to the laptop without headset recording (the laptop keeps the master copy).</summary>
+        public bool WriteToDisk { get; set; } = true;
+
+        private static bool Streaming => LiveStreamClient.Active != null && LiveStreamClient.Active.SessionActive;
+
         public string DirectoryName
         {
             get => directoryName;
@@ -74,14 +80,15 @@ namespace RealityLog.Depth
 
             try
             {
-                var paths = ResolveLegacyPathsIfNeeded();
                 latestSavedTimestampMs = null;
-
-                Directory.CreateDirectory(paths.leftDirectoryPath);
-                Directory.CreateDirectory(paths.rightDirectoryPath);
-
-                leftDepthCsvWriter = new(paths.leftDescriptorFilePath, descriptorHeader);
-                rightDepthCsvWriter = new(paths.rightDescriptorFilePath, descriptorHeader);
+                if (WriteToDisk)
+                {
+                    var paths = ResolveLegacyPathsIfNeeded();
+                    Directory.CreateDirectory(paths.leftDirectoryPath);
+                    Directory.CreateDirectory(paths.rightDirectoryPath);
+                    leftDepthCsvWriter = new(paths.leftDescriptorFilePath, descriptorHeader);
+                    rightDepthCsvWriter = new(paths.rightDescriptorFilePath, descriptorHeader);
+                }
 
                 EnsureDepthFrameProvider();
                 isExporting = true;
@@ -132,9 +139,9 @@ namespace RealityLog.Depth
 
         private void OnBeforeRender()
         {
-            if (!isExporting ||
-                renderTextureExporter == null || depthFrameProvider == null
-                || leftDepthCsvWriter == null || rightDepthCsvWriter == null)
+            if (!isExporting || renderTextureExporter == null || depthFrameProvider == null
+                || (WriteToDisk && (leftDepthCsvWriter == null || rightDepthCsvWriter == null))
+                || (!WriteToDisk && !Streaming))
             {
                 return;
             }
@@ -164,12 +171,21 @@ namespace RealityLog.Depth
                     return;
                 }
 
+                if (Streaming)
+                {
+                    StreamDepth(renderTexture, frameDescriptors, width, height);
+                }
+                latestSavedTimestampMs = unixTime;
+                if (!WriteToDisk)
+                {
+                    return;
+                }
+
                 var paths = ResolveLegacyPathsIfNeeded();
                 var leftDepthFilePath = Path.Join(paths.leftDirectoryPath, $"{unixTime}.raw");
                 var rightDepthFilePath = Path.Join(paths.rightDirectoryPath, $"{unixTime}.raw");
 
                 renderTextureExporter.Export(renderTexture, leftDepthFilePath, rightDepthFilePath);
-                latestSavedTimestampMs = unixTime;
 
                 for (var i = 0; i < FRAME_DESC_COUNT; ++i)
                 {
@@ -203,6 +219,41 @@ namespace RealityLog.Depth
         }
 
         private long? latestSavedTimestampMs;
+
+        private void StreamDepth(RenderTexture renderTexture, DepthFrameDesc[] frameDescriptors, int width, int height)
+        {
+            // Copy descriptor values now: the array may be reused before the GPU readback completes.
+            var jobs = new DepthJob[2];
+            for (var i = 0; i < 2; ++i)
+            {
+                var desc = frameDescriptors[i];
+                jobs[i] = new DepthJob
+                {
+                    Left = i == 0,
+                    TimestampMs = ConvertTimestampNsToUnixTimeMs(desc.timestampNs),
+                    OvrTimestamp = desc.timestampNs / 1.0e9,
+                    Width = width,
+                    Height = height,
+                    Position = desc.createPoseLocation,
+                    Rotation = desc.createPoseRotation,
+                    FovLeft = desc.fovLeftAngleTangent,
+                    FovRight = desc.fovRightAngleTangent,
+                    FovTop = desc.fovTopAngleTangent,
+                    FovDown = desc.fovDownAngleTangent,
+                    NearZ = desc.nearZ,
+                    FarZ = desc.farZ,
+                };
+            }
+            renderTextureExporter!.ExportToCallback(renderTexture, (left, right) =>
+            {
+                var client = LiveStreamClient.Active;
+                if (client == null) return;
+                jobs[0].Ndc = left;
+                jobs[1].Ndc = right;
+                client.EnqueueDepth(jobs[0]);
+                client.EnqueueDepth(jobs[1]);
+            });
+        }
 
         private bool ShouldSaveFrame(long timestampMs)
         {

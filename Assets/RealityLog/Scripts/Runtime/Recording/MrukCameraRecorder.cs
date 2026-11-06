@@ -6,6 +6,7 @@ using System.Globalization;
 using System.IO;
 using Meta.XR;
 using RealityLog.Camera;
+using RealityLog.Streaming;
 using Unity.Collections;
 using UnityEngine;
 
@@ -31,13 +32,29 @@ namespace RealityLog.Recording
         private float nextSampleRealtime;
         private bool recording;
         private int pairIndex;
+        private bool writeToDisk = true;
 
         public bool IsRecording => recording;
+
+        private static bool Streaming => LiveStreamClient.Active != null && LiveStreamClient.Active.SessionActive;
+
+        /// <summary>MRUK intrinsics JSON for one camera (same schema as *_camera_mruk_intrinsics.json), or null.</summary>
+        public string? GetIntrinsicsJson(bool left)
+        {
+            var state = left ? leftState : rightState;
+            if (!state.Enabled || state.Access == null)
+            {
+                return null;
+            }
+            return JsonUtility.ToJson(MrukIntrinsicsMetadata.FromAccess(state.CameraName, state.Access));
+        }
 
         public void ApplyConfiguration(RecordingSessionConfig sessionConfig, RecordingSessionPaths sessionPaths)
         {
             config = sessionConfig;
             paths = sessionPaths;
+            // When streaming, the laptop records the master copy; skip the slow raw RGBA writes on the headset.
+            writeToDisk = !sessionConfig.streaming.enabled || sessionConfig.streaming.recordOnHeadset;
             leftState.Enabled = sessionConfig.camera.left.enabled;
             rightState.Enabled = sessionConfig.camera.right.enabled;
         }
@@ -63,18 +80,21 @@ namespace RealityLog.Recording
             EnableConfiguredCameraAccesses();
 
             Directory.CreateDirectory(paths.RootDirectoryPath);
-            leftFrameWriter = leftState.Enabled
+            leftFrameWriter = writeToDisk && leftState.Enabled
                 ? CreateCsv(paths.LeftMrukCamera.FrameMetadataFilePath, FrameMetadataHeader)
                 : null;
-            rightFrameWriter = rightState.Enabled
+            rightFrameWriter = writeToDisk && rightState.Enabled
                 ? CreateCsv(paths.RightMrukCamera.FrameMetadataFilePath, FrameMetadataHeader)
                 : null;
-            pairWriter = leftState.Enabled && rightState.Enabled
+            pairWriter = writeToDisk && leftState.Enabled && rightState.Enabled
                 ? CreateCsv(paths.MrukStereoPairFilePath, PairMetadataHeader)
                 : null;
 
-            WriteIntrinsics(leftState, paths.LeftMrukCamera.IntrinsicsFilePath);
-            WriteIntrinsics(rightState, paths.RightMrukCamera.IntrinsicsFilePath);
+            if (writeToDisk)
+            {
+                WriteIntrinsics(leftState, paths.LeftMrukCamera.IntrinsicsFilePath);
+                WriteIntrinsics(rightState, paths.RightMrukCamera.IntrinsicsFilePath);
+            }
 
             leftState.ResetRuntimeState();
             rightState.ResetRuntimeState();
@@ -165,7 +185,7 @@ namespace RealityLog.Recording
             RecordingSessionPaths.MrukCameraPaths cameraPaths,
             StreamWriter? writer)
         {
-            if (!state.Enabled || state.Access == null || writer == null)
+            if (!state.Enabled || state.Access == null || (writer == null && !Streaming))
             {
                 return null;
             }
@@ -220,6 +240,7 @@ namespace RealityLog.Recording
             }
 
             NativeArray<Color32> colors = default;
+            NativeArray<Color32> streamPixels = default;
             try
             {
                 colors = access.GetColors();
@@ -231,10 +252,19 @@ namespace RealityLog.Recording
                     rgbaByteCount = expectedPixelCount * 4;
                     if (expectedPixelCount > 0 && colors.Length >= expectedPixelCount)
                     {
-                        fileName = $"{timestampUs}.rgba";
-                        var outputPath = Path.Combine(cameraPaths.ImageDirectoryPath, fileName);
-                        Directory.CreateDirectory(cameraPaths.ImageDirectoryPath);
-                        WriteRgbaFile(outputPath, colors, expectedPixelCount);
+                        if (Streaming)
+                        {
+                            // MRUK owns `colors` only for this frame: copy for the background JPEG encoder.
+                            streamPixels = new NativeArray<Color32>(expectedPixelCount, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
+                            NativeArray<Color32>.Copy(colors, streamPixels, expectedPixelCount);
+                        }
+                        if (writeToDisk)
+                        {
+                            fileName = $"{timestampUs}.rgba";
+                            var outputPath = Path.Combine(cameraPaths.ImageDirectoryPath, fileName);
+                            Directory.CreateDirectory(cameraPaths.ImageDirectoryPath);
+                            WriteRgbaFile(outputPath, colors, expectedPixelCount);
+                        }
                     }
                     else
                     {
@@ -263,11 +293,28 @@ namespace RealityLog.Recording
                 error = AppendError(error, $"GetCameraPose failed: {ex.Message}");
             }
 
+            if (streamPixels.IsCreated)
+            {
+                LiveStreamClient.Active!.EnqueueColor(new ColorJob
+                {
+                    Left = state.Position == PassthroughCameraAccess.CameraPositionType.Left,
+                    FrameIndex = state.FrameCount + 1,
+                    TimestampUs = timestampUs,
+                    UnixTimeMs = timestampMs,
+                    Width = width,
+                    Height = height,
+                    Position = pose.position,
+                    Rotation = pose.rotation,
+                    PoseOk = poseOk,
+                    Pixels = streamPixels,
+                });
+            }
+
             state.FrameCount++;
             state.LastTimestampUs = timestampUs;
             state.LastFrameIndex = state.FrameCount;
             state.LastFileName = fileName;
-            writer.WriteLine(string.Join(",",
+            writer?.WriteLine(string.Join(",",
                 state.FrameCount.ToString(CultureInfo.InvariantCulture),
                 fileName,
                 timestampMs.ToString(CultureInfo.InvariantCulture),
@@ -294,7 +341,7 @@ namespace RealityLog.Recording
                 BoolText(getTextureOk),
                 BoolText(getColorsOk),
                 EscapeCsv(error)));
-            writer.Flush();
+            writer?.Flush();
             if (string.IsNullOrEmpty(fileName))
             {
                 return null;

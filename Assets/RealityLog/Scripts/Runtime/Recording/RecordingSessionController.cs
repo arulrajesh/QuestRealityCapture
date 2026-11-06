@@ -1,9 +1,11 @@
 #nullable enable
 
 using System.Collections.Generic;
+using System.IO;
 using RealityLog.Camera;
 using RealityLog.Depth;
 using RealityLog.OVR;
+using RealityLog.Streaming;
 using UnityEngine;
 
 namespace RealityLog.Recording
@@ -86,12 +88,26 @@ namespace RealityLog.Recording
             }
 
             ConfigureModules(activeConfig, activePaths);
+            var streaming = activeConfig.streaming.enabled && LiveStreamClient.Active != null && IsMrukBackend(activeConfig);
+            if (depthExporter != null)
+            {
+                depthExporter.WriteToDisk = !streaming || activeConfig.streaming.recordOnHeadset;
+            }
 
             if (!StartCameraRecorders(activeConfig))
             {
                 StopStartedModules();
                 ClearActiveSessionState();
                 return false;
+            }
+
+            if (streaming)
+            {
+                // Announce the session to the laptop now that the cameras (and their intrinsics) are open.
+                LiveStreamClient.Active!.BeginSession(
+                    Path.GetFileName(activePaths.RootDirectoryPath.TrimEnd('/', '\\')),
+                    mrukCameraRecorder != null ? mrukCameraRecorder.GetIntrinsicsJson(true) : null,
+                    mrukCameraRecorder != null ? mrukCameraRecorder.GetIntrinsicsJson(false) : null);
             }
 
             if (!StartDepthExporter(activeConfig))
@@ -118,6 +134,10 @@ namespace RealityLog.Recording
 
         public bool StopRecording()
         {
+            if (LiveStreamClient.Active != null)
+            {
+                LiveStreamClient.Active.EndSession("user_stop");
+            }
             var success = StopStartedModules();
             ClearActiveSessionState();
             return success;
@@ -568,6 +588,15 @@ namespace RealityLog.Recording
 
         private void Start()
         {
+            // Connect to the laptop as soon as the app opens, so the HUD shows the link before recording.
+            var bootConfig = RecordingConfigLoader.Load(configJson, externalConfigPath);
+            if (bootConfig.streaming.enabled)
+            {
+                var client = LiveStreamClient.Ensure(gameObject);
+                client.Configure(bootConfig.streaming);
+                LiveFeedbackRenderer.Ensure(gameObject, client);
+            }
+
             if (startRecordingOnStart)
             {
                 StartRecording();

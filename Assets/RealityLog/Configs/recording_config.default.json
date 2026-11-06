@@ -70,5 +70,24 @@
       "positionJumpMeters": 0.3,
       "rotationJumpDegrees": 30.0
     }
+  },
+  "streaming": {
+    "enabled": true,
+    "host": "",
+    "port": 9870,
+    "discoveryPort": 9871,
+    "recordOnHeadset": false,
+    "jpegQuality": 90,
+    "jpegRowOrder": "top_down",
+    "depthEncoding": "u16_ndc",
+    "showHud": true,
+    "showSurfaceOverlay": true,
+    "overlayMode": "confidence",
+    "overlayOpacity": 0.45,
+    "colorMinTranslationM": 0.03,
+    "colorMinRotationDeg": 3.0,
+    "colorMaxFps": 5.0,
+    "colorMaxIntervalS": 1.5,
+    "maxAngularSpeedDps": 150.0
   }
 }
