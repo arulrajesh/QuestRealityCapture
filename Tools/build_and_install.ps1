@@ -22,6 +22,7 @@ $package = "com.t34400.QuestRealityCapture"
 if (-not $SkipBuild) {
     if (-not $Unity) {
         $candidates = @(
+            "$env:USERPROFILE\Unity\Hub\Editor\$UnityVersion\Editor\Unity.exe",
             "C:\Program Files\Unity\Hub\Editor\$UnityVersion\Editor\Unity.exe",
             "$env:ProgramFiles\Unity $UnityVersion\Editor\Unity.exe"
         )
