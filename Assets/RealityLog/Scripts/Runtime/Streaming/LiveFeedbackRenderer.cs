@@ -55,7 +55,9 @@ namespace RealityLog.Streaming
 
         private void CreateHud()
         {
-            var cameraTransform = Camera.main != null ? Camera.main.transform : null;
+            // Fully qualified: inside RealityLog.*, "Camera" resolves to the RealityLog.Camera namespace.
+            var mainCamera = UnityEngine.Camera.main;
+            var cameraTransform = mainCamera != null ? mainCamera.transform : null;
             if (cameraTransform == null) return;
             var go = new GameObject("LiveStreamHud");
             go.transform.SetParent(cameraTransform, false);
