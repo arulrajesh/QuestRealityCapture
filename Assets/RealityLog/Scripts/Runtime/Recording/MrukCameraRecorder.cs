@@ -132,6 +132,12 @@ namespace RealityLog.Recording
             return true;
         }
 
+        private void Awake()
+        {
+            // Scan guidance over the Space Setup room mesh (replaces the voxel dots, which lagged).
+            if (GetComponent<RoomCoverageGuide>() == null) gameObject.AddComponent<RoomCoverageGuide>();
+        }
+
         private void Update()
         {
             if (!recording || config == null || paths == null)

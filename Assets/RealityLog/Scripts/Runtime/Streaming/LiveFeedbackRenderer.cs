@@ -65,7 +65,10 @@ namespace RealityLog.Streaming
             hud = go.AddComponent<TextMesh>();
             var font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             hud.font = font;
-            go.GetComponent<MeshRenderer>().sharedMaterial = font.material;
+            // Always on top: the room grid writes depth, and close surfaces (scanning up close) would hide the HUD.
+            var hudMaterial = new Material(font.material) { renderQueue = 4000 };
+            hudMaterial.SetInt("unity_GUIZTestMode", 8);  // CompareFunction.Always
+            go.GetComponent<MeshRenderer>().sharedMaterial = hudMaterial;
             hud.fontSize = 48;
             hud.characterSize = 0.004f;
             hud.anchor = TextAnchor.MiddleCenter;
@@ -212,7 +215,8 @@ namespace RealityLog.Streaming
                         ? $"<size=64><color=#ffaa33>slower</color></size>  {client.AngularSpeedDps:0}°/s\n"
                         : $"<color=#66ff99>steady</color> {client.AngularSpeedDps:0}°/s\n";
             hud.richText = true;
-            hud.text = $"{speed}{link}\n{session}{flash}\n" +
+            var guidance = string.IsNullOrEmpty(CaptureGuidance.Summary) ? string.Empty : $"{CaptureGuidance.Summary}\n";
+            hud.text = $"{speed}{guidance}{link}\n{session}{flash}\n" +
                        $"keyframes {status.keyframes}  color {status.color_keyframes}  surface {status.surface_m2:0.0} m²  σ {status.median_sigma_mm:0} mm\n" +
                        $"sent {client.FramesSent}  gated {client.FramesGated}  dropped {client.FramesDropped + status.dropped_live}" +
                        (status.tracking_jumps > 0 ? $"  tracking resets {status.tracking_jumps}" : string.Empty);

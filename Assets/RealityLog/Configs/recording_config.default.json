@@ -47,7 +47,7 @@
   "liveFeedback": {
     "enabled": true,
     "coverage": {
-      "enabled": true,
+      "enabled": false,
       "targetUpdateFps": 6,
       "samplingStep": 6,
       "voxelSizeMeters": 0.05,

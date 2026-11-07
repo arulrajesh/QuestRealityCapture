@@ -155,7 +155,10 @@ namespace UnityEngine
     public class Material : Object
     {
         public Material(Shader shader) { }
+        public Material(Material source) { }
+        public int renderQueue { get; set; }
         public void SetFloat(string name, float value) { }
+        public void SetInt(string name, int value) { }
     }
 
     public class Font : Object { public Material material = new(new Shader()); }

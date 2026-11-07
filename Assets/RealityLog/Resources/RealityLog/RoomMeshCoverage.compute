@@ -1,0 +1,83 @@
+// Capture coverage of the Space Setup room mesh (RoomCoverageGuide). One thread per (unwelded) mesh vertex:
+// a vertex is "seen" in a depth frame when it projects inside the depth camera and the depth there matches
+// (not occluded). Seen in a counted update (slow head, new viewpoint) -> one more sharp view, and the
+// closest sharp-view distance is kept. Conventions match UpdateDepthCoverage.compute (depth camera looks
+// down -Z; texture rows are flipped).
+#pragma kernel ResetCoverage
+#pragma kernel UpdateCoverage
+
+Texture2DArray<float> _DepthTexture;
+StructuredBuffer<float3> _Vertices;      // world positions
+RWStructuredBuffer<float2> _Coverage;    // (sharp views, closest sharp view in m; 1000 = none yet)
+
+int _VertexCount;
+int _Width;
+int _Height;
+int _EyeIndex;
+int _UseInfiniteFar;
+int _FlipVerticalProjection;
+float _FovLeftTan;
+float _FovRightTan;
+float _FovTopTan;
+float _FovDownTan;
+float _NearZ;
+float _FarZ;
+float _MinDepthMeters;
+float _MaxDepthMeters;
+float4x4 _WorldToDepthCamera;
+
+static const float kNoView = 1000.0f;
+
+[numthreads(64, 1, 1)]
+void ResetCoverage(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_VertexCount) return;
+    _Coverage[id.x] = float2(0.0f, kNoView);
+}
+
+float NdcToMeters(float rawDepth)
+{
+    float depthScale = -2.0f * _NearZ;
+    float depthBias = -1.0f;
+    if (_UseInfiniteFar == 0)
+    {
+        float depthRange = _FarZ - _NearZ;
+        if (depthRange > 1.0e-6f)
+        {
+            depthScale = -2.0f * _FarZ * _NearZ / depthRange;
+            depthBias = -(_FarZ + _NearZ) / depthRange;
+        }
+    }
+    float denom = rawDepth * 2.0f - 1.0f + depthBias;
+    return abs(denom) < 1.0e-6f ? -1.0f : depthScale / denom;
+}
+
+[numthreads(64, 1, 1)]
+void UpdateCoverage(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_VertexCount) return;
+    float3 p = mul(_WorldToDepthCamera, float4(_Vertices[id.x], 1.0f)).xyz;
+    float d = -p.z;
+    if (d < _MinDepthMeters || d > _MaxDepthMeters) return;
+
+    float xTan = p.x / d;
+    float yTan = p.y / d;
+    float u = (xTan + _FovLeftTan) / (_FovLeftTan + _FovRightTan);
+    float v = _FlipVerticalProjection != 0
+        ? (_FovTopTan - yTan) / (_FovTopTan + _FovDownTan)
+        : (yTan + _FovDownTan) / (_FovTopTan + _FovDownTan);
+    if (u < 0.0f || u >= 1.0f || v < 0.0f || v >= 1.0f) return;
+
+    uint sourceX = min((uint)(u * _Width), (uint)_Width - 1u);
+    uint sourceY = min((uint)(v * _Height), (uint)_Height - 1u);
+    uint textureY = (uint)_Height - sourceY - 1u;
+    float rawDepth = _DepthTexture.Load(int4((int)sourceX, (int)textureY, _EyeIndex, 0));
+    if (rawDepth != rawDepth || rawDepth <= 0.0f || rawDepth >= 1.0f) return;
+    float measured = NdcToMeters(rawDepth);
+    if (measured <= 0.0f) return;
+    // Quest depth is coarse (320^2) and the room mesh approximate: accept 6 cm or 4% of the distance.
+    if (abs(measured - d) > max(0.06f, 0.04f * d)) return;
+
+    float2 c = _Coverage[id.x];
+    _Coverage[id.x] = float2(c.x + 1.0f, min(c.y, d));
+}
