@@ -81,6 +81,7 @@ namespace UnityEngine
         public static float Clamp01(float v) => v < 0 ? 0 : v > 1 ? 1 : v;
         public static float Max(float a, float b) => Math.Max(a, b);
         public static int CeilToInt(float v) => (int)Math.Ceiling(v);
+        public static float Lerp(float a, float b, float t) => a + (b - a) * Clamp01(t);
     }
 
     public static class Debug

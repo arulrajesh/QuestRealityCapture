@@ -8,10 +8,20 @@ namespace RealityLog.Depth
 {
     internal sealed class DepthCoverageParticleRenderer : IDisposable
     {
+        // Capture quality (fidelity mode, 2026-11-07): red = seen but not captured sharply, yellow = partly,
+        // green = enough distinct sharp viewpoints including a close one. Done areas fade so gaps stand out.
+        public const float GoodViews = 6f;      // distinct slow viewpoints for "green"
+        public const float CloseMeters = 0.8f;  // a sharp view this close gives full detail (~0.7 mm per camera pixel)
+        public const float FarMeters = 2.0f;    // sharp views only from beyond this count as no close-up detail
+        private const float NoSharpView = 999f;
+        private static readonly Color Missing = new(1.0f, 0.2f, 0.15f);
+        private static readonly Color Partial = new(1.0f, 0.8f, 0.1f);
+        private static readonly Color Captured = new(0.2f, 0.95f, 0.4f);
+
         private ParticleSystem? particleSystem;
         private ParticleSystem.Particle[]? particles;
         private Vector4[]? readbackPoints;
-        private Vector2[]? readbackMetadata;
+        private Vector4[]? readbackMetadata;
         private int[]? readbackOccupancy;
         private bool isReadbackPending;
         private bool hasPointsReadback;
@@ -114,7 +124,7 @@ namespace RealityLog.Depth
             AsyncGPUReadback.Request(voxelOccupancyBuffer, OnOccupancyReadback);
         }
 
-        public void ApplyImmediate(Vector4[] points, Vector2[] metadata, int[] occupancy, int currentSegmentId)
+        public void ApplyImmediate(Vector4[] points, Vector4[] metadata, int[] occupancy, int currentSegmentId)
         {
             if (!isActive || readbackPoints == null || readbackMetadata == null || readbackOccupancy == null)
             {
@@ -152,7 +162,7 @@ namespace RealityLog.Depth
 
             particles = new ParticleSystem.Particle[size];
             readbackPoints = new Vector4[size];
-            readbackMetadata = new Vector2[size];
+            readbackMetadata = new Vector4[size];
             readbackOccupancy = new int[size];
         }
 
@@ -216,7 +226,7 @@ namespace RealityLog.Depth
                 return;
             }
 
-            request.GetData<Vector2>().CopyTo(readbackMetadata);
+            request.GetData<Vector4>().CopyTo(readbackMetadata);
             hasMetadataReadback = true;
             TryApplyReadback();
         }
@@ -276,7 +286,7 @@ namespace RealityLog.Depth
                     startSize = pointSizeMeters,
                     startLifetime = 999999.0f,
                     remainingLifetime = 999999.0f,
-                    startColor = ParticleColor(Mathf.RoundToInt(metadata.x), metadata.y)
+                    startColor = ParticleColor(Mathf.RoundToInt(metadata.x), metadata.y, metadata.z)
                 };
                 count++;
             }
@@ -284,13 +294,20 @@ namespace RealityLog.Depth
             particleSystem.SetParticles(particles, count);
         }
 
-        private Color32 ParticleColor(int segmentId, float depthMeters)
+        /// <summary>0 = seen only (or only while turning fast), 1 = captured: enough sharp viewpoints and a close one.</summary>
+        public static float Quality(float closestSharpMeters, float sharpViews)
         {
-            var normalizedDepth = Mathf.InverseLerp(minDepthMeters, maxDepthMeters, depthMeters);
-            var color = Color.Lerp(new Color(1.0f, 0.36f, 0.08f), new Color(0.12f, 0.58f, 1.0f), normalizedDepth);
+            var detail = closestSharpMeters >= NoSharpView ? 0f : Mathf.InverseLerp(FarMeters, CloseMeters, closestSharpMeters);
+            var support = Mathf.Clamp01(sharpViews / GoodViews);
+            return Mathf.Min(detail, support);
+        }
+
+        private Color32 ParticleColor(int segmentId, float closestSharpMeters, float sharpViews)
+        {
+            var quality = Quality(closestSharpMeters, sharpViews);
+            var color = quality < 0.5f ? Color.Lerp(Missing, Partial, quality * 2f) : Color.Lerp(Partial, Captured, (quality - 0.5f) * 2f);
             var segmentAlpha = segmentId == currentSegmentId ? 1.0f : previousSegmentAlpha;
-            var distanceAlpha = Mathf.Lerp(0.95f, 0.45f, normalizedDepth);
-            color.a = segmentAlpha * distanceAlpha;
+            color.a = segmentAlpha * Mathf.Lerp(0.9f, 0.3f, quality);
             return color;
         }
     }

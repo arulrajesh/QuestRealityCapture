@@ -499,7 +499,7 @@ MonoBehaviour:
   coveragePointMaterial: {fileID: 0}
   trackingSpace: {fileID: 0}
   renderMode: 0
-  pointSizeMeters: 0.01
+  pointSizeMeters: 0.03
   previousSegmentAlpha: 0.22
   particleRefreshIntervalSeconds: 0.25
   frustumLineWidthMeters: 0.006

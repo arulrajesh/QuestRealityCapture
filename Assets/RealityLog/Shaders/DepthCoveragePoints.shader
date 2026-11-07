@@ -20,7 +20,7 @@ Shader "RealityLog/DepthCoveragePoints"
             #include "UnityCG.cginc"
 
             StructuredBuffer<float4> _CoveragePoints;
-            StructuredBuffer<float2> _CoverageMetadata;
+            StructuredBuffer<float4> _CoverageMetadata;
             StructuredBuffer<int> _VoxelOccupancy;
             float _PointSizeMeters;
             float _CurrentSegmentId;
@@ -28,6 +28,9 @@ Shader "RealityLog/DepthCoveragePoints"
             float _MinDepthMeters;
             float _MaxDepthMeters;
             float4 _PointColor;
+            float _GoodViews;
+            float _CloseMeters;
+            float _FarMeters;
 
             struct appdata
             {
@@ -54,19 +57,22 @@ Shader "RealityLog/DepthCoveragePoints"
 
                 int occupied = _VoxelOccupancy[pointIndex];
                 float4 coveragePoint = _CoveragePoints[pointIndex];
-                float2 metadata = _CoverageMetadata[pointIndex];
+                float4 metadata = _CoverageMetadata[pointIndex];
                 float3 cameraRight = normalize(float3(unity_CameraToWorld[0][0], unity_CameraToWorld[1][0], unity_CameraToWorld[2][0]));
                 float3 cameraUp = normalize(float3(unity_CameraToWorld[0][1], unity_CameraToWorld[1][1], unity_CameraToWorld[2][1]));
                 corner *= _PointSizeMeters;
                 float3 world = coveragePoint.xyz + cameraRight * corner.x + cameraUp * corner.y;
 
                 o.pos = UnityWorldToClipPos(world);
-                float normalizedDepth = saturate((metadata.y - _MinDepthMeters) / max(0.001, _MaxDepthMeters - _MinDepthMeters));
-                float3 nearColor = float3(1.0, 0.36, 0.08);
-                float3 farColor = float3(0.12, 0.58, 1.0);
+                // Capture quality, as in DepthCoverageParticleRenderer.Quality: red missing, yellow partial, green captured.
+                float detail = metadata.y >= 999.0 ? 0.0 : saturate((_FarMeters - metadata.y) / max(0.001, _FarMeters - _CloseMeters));
+                float quality = min(detail, saturate(metadata.z / max(1.0, _GoodViews)));
+                float3 missing = float3(1.0, 0.2, 0.15);
+                float3 partial = float3(1.0, 0.8, 0.1);
+                float3 captured = float3(0.2, 0.95, 0.4);
+                float3 rgb = quality < 0.5 ? lerp(missing, partial, quality * 2.0) : lerp(partial, captured, (quality - 0.5) * 2.0);
                 float segmentAlpha = abs(metadata.x - _CurrentSegmentId) < 0.5 ? 1.0 : _PreviousSegmentAlpha;
-                float distanceAlpha = lerp(0.95, 0.45, normalizedDepth);
-                o.color = float4(lerp(nearColor, farColor, normalizedDepth), occupied == 1 ? segmentAlpha * distanceAlpha : 0.0);
+                o.color = float4(rgb, occupied == 1 ? segmentAlpha * lerp(0.9, 0.3, quality) : 0.0);
                 return o;
             }
 

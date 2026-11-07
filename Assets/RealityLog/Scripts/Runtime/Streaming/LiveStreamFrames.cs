@@ -18,19 +18,25 @@ namespace RealityLog.Streaming
         /// <summary>Row order of the JPEG Unity produces from the bottom-up MRUK buffer. Flip here if images arrive upside down.</summary>
         public string jpegRowOrder = "top_down";
         public string depthEncoding = "u16_ndc";
-        public int colorQueueSize = 4;
+        public int colorQueueSize = 8;
+        /// <summary>Parallel JPEG encoders. One managed ~13 JPEGs/s at 1728².</summary>
+        public int encoderThreads = 3;
         public int depthQueueSize = 4;
         public bool showHud = true;
-        public bool showSurfaceOverlay = true;
+        public bool showSurfaceOverlay = false;  // laptop live mesh; fidelity mode uses the headset's own coverage instead
         /// <summary>Overlay coloring: "confidence" (green = solid, red = needs more looking) or "color" (camera colors).</summary>
         public string overlayMode = "confidence";
         public float overlayOpacity = 0.45f;
-        // Headset-side color gate (the laptop's Kalman selection decides what is finally kept).
-        public float colorMinTranslationM = 0.03f;
-        public float colorMinRotationDeg = 3f;
-        public float colorMaxFps = 10f;  // stereo pairs per second; splats need many views (laptop compaction keeps the sharpest per 0.25 s)
+        // Headset-side color gate (fidelity mode, 2026-11-07): dense views, never while turning fast.
+        // The laptop's compaction still keeps only the sharpest frame per short window.
+        public float colorMinTranslationM = 0.01f;
+        public float colorMinRotationDeg = 1f;
+        public float colorMaxFps = 15f;  // stereo pairs per second; view count was the strongest splat-quality lever
         public float colorMaxIntervalS = 1.5f;
-        public float maxAngularSpeedDps = 150f;
+        /// <summary>Frames are not sent above this head speed: photo-to-model error was 5 px at 25-50 deg/s, 1.3 px below 10.</summary>
+        public float maxAngularSpeedDps = 30f;
+        /// <summary>The HUD shows "slow down" above this head speed (deg/s).</summary>
+        public float slowDownDps = 20f;
     }
 
     /// <summary>Color frame captured on the main thread. Owns <see cref="Pixels"/> (bottom-up RGBA32) until encoded.</summary>

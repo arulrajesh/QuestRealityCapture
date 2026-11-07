@@ -88,6 +88,7 @@ namespace RealityLog.Depth
         private ComputeBuffer? voxelOccupancyBuffer;
         private ComputeBuffer? coveragePointsBuffer;
         private ComputeBuffer? coverageMetadataBuffer;
+        private ComputeBuffer? voxelLastFrameBuffer;
         private Material? runtimeCoverageMaterial;
         private DepthCoverageParticleRenderer? particleRenderer;
         private DepthFrustumHistoryRenderer? frustumHistoryRenderer;
@@ -100,6 +101,19 @@ namespace RealityLog.Depth
         private float nextDepthPoseDiagnosticRealtime;
         private int allocatedMaxVoxels;
         private int currentSegmentId;
+        private int coverageFrameId;
+        private float headSpeedDps;
+        private Quaternion lastHeadRotation = Quaternion.identity;
+        private bool hasLastHeadRotation;
+        private Vector3 lastCountedPosition = new(float.MaxValue, 0f, 0f);
+        private Quaternion lastCountedRotation = Quaternion.identity;
+
+        /// <summary>A view counts toward "captured" only below this head speed (frames above it are blurred and not sent).</summary>
+        private float SharpViewMaxDps => RealityLog.Streaming.LiveStreamClient.Active != null
+            ? RealityLog.Streaming.LiveStreamClient.Active.Settings.maxAngularSpeedDps
+            : 30f;
+        private const float NewViewpointMeters = 0.05f;
+        private const float NewViewpointDegrees = 5f;
 
         public bool IsVisualizing => isVisualizing;
         public int CurrentSegmentId => currentSegmentId;
@@ -216,6 +230,7 @@ namespace RealityLog.Depth
 
         private void Update()
         {
+            TrackHeadSpeed();
             if (!isVisualizing || Time.realtimeSinceStartup < nextUpdateRealtime)
             {
                 return;
@@ -253,6 +268,9 @@ namespace RealityLog.Depth
             material.SetBuffer("_CoveragePoints", coveragePointsBuffer);
             material.SetBuffer("_CoverageMetadata", coverageMetadataBuffer);
             material.SetBuffer("_VoxelOccupancy", voxelOccupancyBuffer);
+            material.SetFloat("_GoodViews", DepthCoverageParticleRenderer.GoodViews);
+            material.SetFloat("_CloseMeters", DepthCoverageParticleRenderer.CloseMeters);
+            material.SetFloat("_FarMeters", DepthCoverageParticleRenderer.FarMeters);
             material.SetFloat("_PointSizeMeters", pointSizeMeters);
             material.SetFloat("_CurrentSegmentId", currentSegmentId);
             material.SetFloat("_PreviousSegmentAlpha", previousSegmentAlpha);
@@ -265,7 +283,8 @@ namespace RealityLog.Depth
         private void DispatchCoverageUpdate()
         {
             if (depthFrameProvider == null || updateCoverageShader == null || updateKernel == InvalidKernel
-                || coveragePointsBuffer == null || coverageMetadataBuffer == null || voxelKeysBuffer == null || voxelOccupancyBuffer == null)
+                || coveragePointsBuffer == null || coverageMetadataBuffer == null || voxelKeysBuffer == null || voxelOccupancyBuffer == null
+                || voxelLastFrameBuffer == null)
             {
                 return;
             }
@@ -292,6 +311,9 @@ namespace RealityLog.Depth
             updateCoverageShader.SetBuffer(updateKernel, "_VoxelOccupancy", voxelOccupancyBuffer);
             updateCoverageShader.SetBuffer(updateKernel, "_CoveragePoints", coveragePointsBuffer);
             updateCoverageShader.SetBuffer(updateKernel, "_CoverageMetadata", coverageMetadataBuffer);
+            updateCoverageShader.SetBuffer(updateKernel, "_VoxelLastFrame", voxelLastFrameBuffer);
+            updateCoverageShader.SetInt("_FrameId", ++coverageFrameId);
+            updateCoverageShader.SetInt("_CountView", ShouldCountView(cameraToWorld) ? 1 : 0);
             updateCoverageShader.SetInt("_Width", depthTexture.width);
             updateCoverageShader.SetInt("_Height", depthTexture.height);
             updateCoverageShader.SetInt("_EyeIndex", eyeIndex);
@@ -316,6 +338,35 @@ namespace RealityLog.Depth
             updateCoverageShader.Dispatch(updateKernel, Mathf.Max(1, groupsX), Mathf.Max(1, groupsY), 1);
         }
 
+
+        /// <summary>Head angular speed from the main camera, smoothed (deg/s).</summary>
+        private void TrackHeadSpeed()
+        {
+            var mainCamera = UnityEngine.Camera.main;
+            if (mainCamera == null || Time.deltaTime <= 0f) return;
+            var rotation = mainCamera.transform.rotation;
+            if (hasLastHeadRotation)
+            {
+                var instant = Quaternion.Angle(lastHeadRotation, rotation) / Time.deltaTime;
+                headSpeedDps = Mathf.Lerp(headSpeedDps, instant, 0.3f);
+            }
+            lastHeadRotation = rotation;
+            hasLastHeadRotation = true;
+        }
+
+        /// <summary>Count this update as a sharp, new viewpoint: slow head, and moved since the last counted one.</summary>
+        private bool ShouldCountView(Matrix4x4 depthCameraToWorld)
+        {
+            if (headSpeedDps > SharpViewMaxDps) return false;
+            Vector3 position = depthCameraToWorld.GetColumn(3);
+            var rotation = depthCameraToWorld.rotation;
+            var moved = Vector3.Distance(position, lastCountedPosition) >= NewViewpointMeters
+                        || Quaternion.Angle(rotation, lastCountedRotation) >= NewViewpointDegrees;
+            if (!moved) return false;
+            lastCountedPosition = position;
+            lastCountedRotation = rotation;
+            return true;
+        }
 
         private void LogDepthPoseDiagnosticsIfNeeded(DepthFrameDesc descriptor, Matrix4x4 cameraToWorld, int eyeIndex)
         {
@@ -397,7 +448,8 @@ namespace RealityLog.Depth
 
         private void AllocateBuffers(int maxVoxels)
         {
-            if (voxelKeysBuffer != null && voxelOccupancyBuffer != null && coveragePointsBuffer != null && coverageMetadataBuffer != null && allocatedMaxVoxels == maxVoxels)
+            if (voxelKeysBuffer != null && voxelOccupancyBuffer != null && coveragePointsBuffer != null && coverageMetadataBuffer != null
+                && voxelLastFrameBuffer != null && allocatedMaxVoxels == maxVoxels)
             {
                 return;
             }
@@ -407,15 +459,20 @@ namespace RealityLog.Depth
             voxelKeysBuffer = new ComputeBuffer(maxVoxels, sizeof(int) * 4, ComputeBufferType.Structured);
             voxelOccupancyBuffer = new ComputeBuffer(maxVoxels, sizeof(int), ComputeBufferType.Structured);
             coveragePointsBuffer = new ComputeBuffer(maxVoxels, sizeof(float) * 4, ComputeBufferType.Structured);
-            coverageMetadataBuffer = new ComputeBuffer(maxVoxels, sizeof(float) * 2, ComputeBufferType.Structured);
+            coverageMetadataBuffer = new ComputeBuffer(maxVoxels, sizeof(float) * 4, ComputeBufferType.Structured);
+            voxelLastFrameBuffer = new ComputeBuffer(maxVoxels, sizeof(int), ComputeBufferType.Structured);
         }
 
         private void ClearCoverageBuffers()
         {
-            if (updateCoverageShader == null || clearKernel == InvalidKernel || voxelKeysBuffer == null || voxelOccupancyBuffer == null || coveragePointsBuffer == null || coverageMetadataBuffer == null)
+            if (updateCoverageShader == null || clearKernel == InvalidKernel || voxelKeysBuffer == null || voxelOccupancyBuffer == null || coveragePointsBuffer == null || coverageMetadataBuffer == null
+                || voxelLastFrameBuffer == null)
             {
                 return;
             }
+
+            updateCoverageShader.SetBuffer(clearKernel, "_VoxelLastFrame", voxelLastFrameBuffer);
+            lastCountedPosition = new Vector3(float.MaxValue, 0f, 0f);
 
             updateCoverageShader.SetBuffer(clearKernel, "_VoxelKeys", voxelKeysBuffer);
             updateCoverageShader.SetBuffer(clearKernel, "_VoxelOccupancy", voxelOccupancyBuffer);
@@ -436,6 +493,8 @@ namespace RealityLog.Depth
             coveragePointsBuffer = null;
             coverageMetadataBuffer?.Release();
             coverageMetadataBuffer = null;
+            voxelLastFrameBuffer?.Release();
+            voxelLastFrameBuffer = null;
             allocatedMaxVoxels = 0;
         }
 
@@ -607,7 +666,7 @@ namespace RealityLog.Depth
 
             var maxVoxels = settings.maxVoxels;
             var points = new Vector4[maxVoxels];
-            var metadata = new Vector2[maxVoxels];
+            var metadata = new Vector4[maxVoxels];
             var occupancy = new int[maxVoxels];
             var keys = new EditorVoxelKey[maxVoxels];
             var count = editorCoverageSource switch
@@ -713,7 +772,7 @@ namespace RealityLog.Depth
             return count;
         }
 
-        private void FillEditorMetadata(Vector4[] points, Vector2[] metadata, int[] occupancy)
+        private void FillEditorMetadata(Vector4[] points, Vector4[] metadata, int[] occupancy)
         {
             for (var i = 0; i < points.Length && i < metadata.Length && i < occupancy.Length; i++)
             {
@@ -724,7 +783,7 @@ namespace RealityLog.Depth
 
                 var point = new Vector3(points[i].x, points[i].y, points[i].z);
                 var depth = Vector3.Distance(transform.position, point);
-                metadata[i] = new Vector2(currentSegmentId, Mathf.Clamp(depth, settings.minDepthMeters, settings.maxDepthMeters));
+                metadata[i] = new Vector4(currentSegmentId, Mathf.Clamp(depth, settings.minDepthMeters, settings.maxDepthMeters), i % 8, 0f);
             }
         }
 

@@ -5,7 +5,8 @@ Texture2DArray<float> _DepthTexture;
 RWStructuredBuffer<int4> _VoxelKeys;
 RWStructuredBuffer<int> _VoxelOccupancy;
 RWStructuredBuffer<float4> _CoveragePoints;
-RWStructuredBuffer<float2> _CoverageMetadata;
+RWStructuredBuffer<float4> _CoverageMetadata;  // (segment, closest sharp-view depth m, sharp views, 0)
+RWStructuredBuffer<int> _VoxelLastFrame;       // last update that counted a view here (one count per update)
 
 int _Width;
 int _Height;
@@ -25,10 +26,13 @@ float _FarZ;
 int _UseInfiniteFar;
 int _FlipVerticalProjection;
 float4x4 _DepthCameraToWorld;
+int _FrameId;
+int _CountView;  // 1 while the head is slow and has moved since the last counted update
 
 static const int kMaxProbeCount = 8;
 static const int kEmptyVoxel = 0;
 static const int kOccupiedVoxel = 1;
+static const float kNoSharpView = 1000.0f;
 
 uint HashVoxel(int3 voxel, int segmentId)
 {
@@ -50,6 +54,19 @@ float3 PixelToDepthCamera(float depthMeters, uint sourceX, uint sourceY)
     return float3(xTan * depthMeters, yTan * depthMeters, -depthMeters);
 }
 
+// One count per voxel per update, even when several depth samples land in it.
+void CountSharpView(uint slot, float depthMeters)
+{
+    if (_CountView == 0) return;
+    int previousFrame;
+    InterlockedExchange(_VoxelLastFrame[slot], _FrameId, previousFrame);
+    if (previousFrame != _FrameId)
+    {
+        _CoverageMetadata[slot].z = _CoverageMetadata[slot].z + 1.0f;
+    }
+    _CoverageMetadata[slot].y = min(_CoverageMetadata[slot].y, depthMeters);
+}
+
 [numthreads(64, 1, 1)]
 void ClearCoverage(uint3 id : SV_DispatchThreadID)
 {
@@ -57,7 +74,8 @@ void ClearCoverage(uint3 id : SV_DispatchThreadID)
     _VoxelKeys[id.x] = int4(0, 0, 0, 0);
     _VoxelOccupancy[id.x] = kEmptyVoxel;
     _CoveragePoints[id.x] = float4(0.0f, 0.0f, 0.0f, -1.0f);
-    _CoverageMetadata[id.x] = float2(-1.0f, 0.0f);
+    _CoverageMetadata[id.x] = float4(-1.0f, kNoSharpView, 0.0f, 0.0f);
+    _VoxelLastFrame[id.x] = -1;
 }
 
 [numthreads(8, 8, 1)]
@@ -107,15 +125,15 @@ void UpdateCoverage(uint3 id : SV_DispatchThreadID)
         {
             _VoxelKeys[slot] = int4(voxel, _SegmentId);
             _CoveragePoints[slot] = float4(((float3)voxel + 0.5f) * _VoxelSizeMeters, (float)_SegmentId);
-            _CoverageMetadata[slot] = float2((float)_SegmentId, depthMeters);
+            _CoverageMetadata[slot].x = (float)_SegmentId;
+            CountSharpView(slot, depthMeters);
             return;
         }
 
         if (_VoxelOccupancy[slot] == kOccupiedVoxel && key.x == voxel.x && key.y == voxel.y && key.z == voxel.z && key.w == _SegmentId)
         {
             _CoveragePoints[slot] = float4(((float3)voxel + 0.5f) * _VoxelSizeMeters, (float)_SegmentId);
-            float storedDepth = _CoverageMetadata[slot].y;
-            _CoverageMetadata[slot] = float2((float)_SegmentId, min(storedDepth, depthMeters));
+            CountSharpView(slot, depthMeters);
             return;
         }
     }

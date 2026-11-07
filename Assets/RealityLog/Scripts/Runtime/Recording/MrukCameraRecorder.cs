@@ -239,6 +239,28 @@ namespace RealityLog.Recording
                 error = AppendError(error, $"GetTexture failed: {ex.Message}");
             }
 
+            var pose = default(UnityEngine.Pose);
+            var poseOk = false;
+            try
+            {
+                pose = access.GetCameraPose();
+                poseOk = true;
+            }
+            catch (Exception ex)
+            {
+                error = AppendError(error, $"GetCameraPose failed: {ex.Message}");
+            }
+
+            // Fidelity mode samples at camera rate; the gate decides before any pixels are read or copied.
+            var isLeft = state.Position == PassthroughCameraAccess.CameraPositionType.Left;
+            var streamThis = Streaming && poseOk
+                && LiveStreamClient.Active!.WantsColor(isLeft, timestampUs, pose.position, pose.rotation);
+            if (!streamThis && !writeToDisk)
+            {
+                state.LastTimestampUs = timestampUs;
+                return null;
+            }
+
             NativeArray<Color32> colors = default;
             NativeArray<Color32> streamPixels = default;
             try
@@ -252,7 +274,7 @@ namespace RealityLog.Recording
                     rgbaByteCount = expectedPixelCount * 4;
                     if (expectedPixelCount > 0 && colors.Length >= expectedPixelCount)
                     {
-                        if (Streaming)
+                        if (streamThis)
                         {
                             // MRUK owns `colors` only for this frame: copy for the background JPEG encoder.
                             streamPixels = new NativeArray<Color32>(expectedPixelCount, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
@@ -281,23 +303,11 @@ namespace RealityLog.Recording
                 error = AppendError(error, $"GetColors failed: {ex.Message}");
             }
 
-            var pose = default(UnityEngine.Pose);
-            var poseOk = false;
-            try
-            {
-                pose = access.GetCameraPose();
-                poseOk = true;
-            }
-            catch (Exception ex)
-            {
-                error = AppendError(error, $"GetCameraPose failed: {ex.Message}");
-            }
-
             if (streamPixels.IsCreated)
             {
                 LiveStreamClient.Active!.EnqueueColor(new ColorJob
                 {
-                    Left = state.Position == PassthroughCameraAccess.CameraPositionType.Left,
+                    Left = isLeft,
                     FrameIndex = state.FrameCount + 1,
                     TimestampUs = timestampUs,
                     UnixTimeMs = timestampMs,

@@ -16,7 +16,8 @@ namespace RealityLog.Streaming
 {
     /// <summary>
     /// Streams capture frames to the MQ3DRecon laptop receiver and receives live feedback.
-    /// Threads: network (connect, send, heartbeat), reader (feedback), encoder (JPEG / u16 depth).
+    /// Threads: network (connect, send, heartbeat), reader (feedback), and <see cref="LiveStreamSettings.encoderThreads"/>
+    /// encoders (JPEG / u16 depth). One encoder managed only ~13 JPEGs/s at 1728² (6.6 stereo pairs/s, 2026-11-07).
     /// Public methods are main-thread safe and never block on the network.
     /// </summary>
     public sealed class LiveStreamClient : MonoBehaviour
@@ -32,19 +33,23 @@ namespace RealityLog.Streaming
         /// <summary>Color frames intentionally not sent (no head motion, or too fast to be sharp). Not a loss.</summary>
         public long FramesGated => Interlocked.Read(ref gatedFrames);
         public bool SessionActive => sessionName != null;
+        /// <summary>Head (left camera) angular speed at the last sampled color frame, deg/s. Main thread.</summary>
+        public float AngularSpeedDps { get; private set; }
+        /// <summary>True while turning too fast for sharp frames (<see cref="LiveStreamSettings.slowDownDps"/>).</summary>
+        public bool TooFast => AngularSpeedDps > Settings.slowDownDps;
 
         /// <summary>Feedback from the laptop, drained on the main thread by <see cref="LiveFeedbackRenderer"/>.</summary>
         public readonly ConcurrentQueue<IncomingMessage> Incoming = new();
 
-        private readonly DropOldestQueue<ColorJob> colorJobs = new(4, job => job.Dispose());
+        private DropOldestQueue<ColorJob> colorJobs = new(4, job => job.Dispose());
         private readonly DropOldestQueue<DepthJob> depthJobs = new(8);
-        private readonly DropOldestQueue<byte[]> colorOut = new(4);
+        private readonly DropOldestQueue<byte[]> colorOut = new(8);
         private readonly DropOldestQueue<byte[]> depthOut = new(8);
         private readonly ConcurrentQueue<byte[]> control = new();
-        private readonly AutoResetEvent encodeSignal = new(false);
+        private readonly SemaphoreSlim encodeWork = new(0);
         private readonly AutoResetEvent sendSignal = new(false);
         private Thread? networkThread;
-        private Thread? encodeThread;
+        private Thread[] encodeThreads = Array.Empty<Thread>();
         private volatile bool stopping;
         private volatile bool connected;
         private string dataDirectory = string.Empty;
@@ -78,10 +83,18 @@ namespace RealityLog.Streaming
             appVersion = Application.version;
             if (settings.enabled && networkThread == null)
             {
+                colorJobs = new DropOldestQueue<ColorJob>(Math.Max(2, settings.colorQueueSize), job => job.Dispose());
                 networkThread = new Thread(NetworkLoop) { IsBackground = true, Name = "LiveStreamNetwork" };
-                encodeThread = new Thread(EncodeLoop) { IsBackground = true, Name = "LiveStreamEncode" };
+                encodeThreads = new Thread[Math.Clamp(settings.encoderThreads, 1, 4)];
+                for (var i = 0; i < encodeThreads.Length; ++i)
+                {
+                    encodeThreads[i] = new Thread(EncodeLoop)
+                    {
+                        IsBackground = true, Name = $"LiveStreamEncode{i}", Priority = System.Threading.ThreadPriority.BelowNormal,
+                    };
+                }
                 networkThread.Start();
-                encodeThread.Start();
+                foreach (var thread in encodeThreads) thread.Start();
             }
         }
 
@@ -93,7 +106,7 @@ namespace RealityLog.Streaming
         private void OnDestroy()
         {
             stopping = true;
-            encodeSignal.Set();
+            encodeWork.Release(Math.Max(1, encodeThreads.Length));
             sendSignal.Set();
             colorJobs.Clear();
             if (Active == this) Active = null;
@@ -119,24 +132,37 @@ namespace RealityLog.Streaming
             sendSignal.Set();
         }
 
-        /// <summary>Hands over a copy of the MRUK pixels (bottom-up RGBA32). Ownership passes to the client.</summary>
+        /// <summary>
+        /// Main thread, before copying any pixels: should this color frame be sent? Stateful (it records the
+        /// decision), so call it exactly once per sampled frame, left eye first. Copy the pixels and call
+        /// <see cref="EnqueueColor"/> only when it returns true.
+        /// </summary>
+        public bool WantsColor(bool left, long timestampUs, Vector3 position, Quaternion rotation)
+        {
+            if (left) UpdateAngularSpeed(timestampUs, rotation);
+            if (sessionName == null || !connected) return false;
+            if (ShouldSendColor(left, timestampUs, position, rotation)) return true;
+            Interlocked.Increment(ref gatedFrames);
+            return false;
+        }
+
+        /// <summary>Hands over a copy of the MRUK pixels (bottom-up RGBA32) that <see cref="WantsColor"/> accepted. Ownership passes to the client.</summary>
         public void EnqueueColor(ColorJob job)
         {
-            if (sessionName == null || !connected || !ShouldSendColor(job))
+            if (sessionName == null || !connected)
             {
                 job.Dispose();
-                if (sessionName != null) Interlocked.Increment(ref gatedFrames);
                 return;
             }
             colorJobs.Enqueue(job);
-            encodeSignal.Set();
+            encodeWork.Release();
         }
 
         public void EnqueueDepth(DepthJob job)
         {
             if (sessionName == null || !connected) return;
             depthJobs.Enqueue(job);
-            encodeSignal.Set();
+            encodeWork.Release();
         }
 
         /// <summary>
@@ -144,44 +170,53 @@ namespace RealityLog.Streaming
         /// send a color pair only after real head motion, never during very fast turns.
         /// The right eye follows the left eye's decision through the shared timestamp.
         /// </summary>
-        private bool ShouldSendColor(ColorJob job)
+        private bool ShouldSendColor(bool left, long timestampUs, Vector3 position, Quaternion rotation)
         {
-            if (!job.Left)
+            if (!left)
             {
-                return lastSentColorUs != 0 && Math.Abs(job.TimestampUs - lastSentColorUs) <= 20_000;  // stereo pair
+                return lastSentColorUs != 0 && Math.Abs(timestampUs - lastSentColorUs) <= 20_000;  // stereo pair
             }
-            var dt = lastColorPoseUs > 0 ? (job.TimestampUs - lastColorPoseUs) / 1e6f : 0f;
-            var angularSpeed = dt > 0f ? Quaternion.Angle(lastColorRotation, job.Rotation) / dt : 0f;
-            lastColorPoseUs = job.TimestampUs;
-            lastColorRotation = job.Rotation;
-            if (angularSpeed > Settings.maxAngularSpeedDps)
+            if (AngularSpeedDps > Settings.maxAngularSpeedDps)
             {
-                return false;
+                return false;  // motion-blurred: photo-to-model error was 5 px at 25-50 deg/s vs 1.3 px below 10
             }
-            var sinceLast = (job.TimestampUs - lastSentColorUs) / 1e6f;
-            var moved = Vector3.Distance(job.Position, lastSentPosition) >= Settings.colorMinTranslationM
-                        || Quaternion.Angle(job.Rotation, lastSentRotation) >= Settings.colorMinRotationDeg;
+            var sinceLast = (timestampUs - lastSentColorUs) / 1e6f;
+            var moved = Vector3.Distance(position, lastSentPosition) >= Settings.colorMinTranslationM
+                        || Quaternion.Angle(rotation, lastSentRotation) >= Settings.colorMinRotationDeg;
             if (lastSentColorUs != 0 && sinceLast < 1f / Mathf.Max(0.1f, Settings.colorMaxFps)) return false;
             if (lastSentColorUs != 0 && !moved && sinceLast < Settings.colorMaxIntervalS) return false;
-            lastSentColorUs = job.TimestampUs;
-            lastSentPosition = job.Position;
-            lastSentRotation = job.Rotation;
+            lastSentColorUs = timestampUs;
+            lastSentPosition = position;
+            lastSentRotation = rotation;
             return true;
+        }
+
+        private void UpdateAngularSpeed(long timestampUs, Quaternion rotation)
+        {
+            var dt = lastColorPoseUs > 0 ? (timestampUs - lastColorPoseUs) / 1e6f : 0f;
+            if (dt > 0f && dt < 0.5f)
+            {
+                var instant = Quaternion.Angle(lastColorRotation, rotation) / dt;
+                AngularSpeedDps = Mathf.Lerp(AngularSpeedDps, instant, 0.6f);  // light smoothing over ~2 frames
+            }
+            lastColorPoseUs = timestampUs;
+            lastColorRotation = rotation;
         }
 
         // ---------------------------------------------------------------- encoder thread
 
+        /// <summary>Runs on every encoder thread. Frames may leave slightly out of order; the laptop orders by timestamp.</summary>
         private void EncodeLoop()
         {
             while (!stopping)
             {
-                encodeSignal.WaitOne(500);
+                encodeWork.Wait(500);
                 while (!stopping && depthJobs.TryDequeue(out var depth))
                 {
                     depthOut.Enqueue(LiveStreamMessages.Depth(depth, Settings.depthEncoding));
                     sendSignal.Set();
                 }
-                while (!stopping && colorJobs.TryDequeue(out var color))
+                if (!stopping && colorJobs.TryDequeue(out var color))
                 {
                     try
                     {
@@ -256,7 +291,13 @@ namespace RealityLog.Streaming
                 }
                 while (control.TryDequeue(out var message)) Write(stream, message);
                 while (depthOut.TryDequeue(out var depth)) Write(stream, depth);
-                if (colorOut.TryDequeue(out var color)) Write(stream, color);
+                // Drain every encoded color frame: with several encoders, signals coalesce, so sending one per wake
+                // would cap the rate. Depth goes in between so it never waits behind a burst of color.
+                while (!stopping && colorOut.TryDequeue(out var color))
+                {
+                    Write(stream, color);
+                    while (depthOut.TryDequeue(out var between)) Write(stream, between);
+                }
                 if (pendingEndReason != null && colorOut.Count == 0 && depthOut.Count == 0 && colorJobs.Count == 0 && depthJobs.Count == 0)
                 {
                     Write(stream, LiveStreamMessages.SessionEnd(pendingEndReason, FramesDropped));

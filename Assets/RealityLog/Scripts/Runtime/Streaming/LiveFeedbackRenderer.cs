@@ -203,8 +203,16 @@ namespace RealityLog.Streaming
             var link = client.IsConnected ? $"<color=#66ff99>● laptop</color> {client.Endpoint}" : $"<color=#ff6666>● {client.StatusText}</color>";
             var flash = Time.time < keyframeFlashUntil ? "  <color=#66ff99>KEYFRAME ✓</color>" : string.Empty;
             var session = client.SessionActive ? $"REC {status.session}" : "not recording (☰ to start)";
+            // Head speed cue: frames taken while turning fast are blurred (and not sent above maxAngularSpeedDps).
+            var speed = !client.SessionActive
+                ? string.Empty
+                : client.AngularSpeedDps > client.Settings.maxAngularSpeedDps
+                    ? $"<size=72><color=#ff4444>SLOW DOWN</color></size>  {client.AngularSpeedDps:0}°/s (frames skipped)\n"
+                    : client.TooFast
+                        ? $"<size=64><color=#ffaa33>slower</color></size>  {client.AngularSpeedDps:0}°/s\n"
+                        : $"<color=#66ff99>steady</color> {client.AngularSpeedDps:0}°/s\n";
             hud.richText = true;
-            hud.text = $"{link}\n{session}{flash}\n" +
+            hud.text = $"{speed}{link}\n{session}{flash}\n" +
                        $"keyframes {status.keyframes}  color {status.color_keyframes}  surface {status.surface_m2:0.0} m²  σ {status.median_sigma_mm:0} mm\n" +
                        $"sent {client.FramesSent}  gated {client.FramesGated}  dropped {client.FramesDropped + status.dropped_live}" +
                        (status.tracking_jumps > 0 ? $"  tracking resets {status.tracking_jumps}" : string.Empty);
