@@ -8,7 +8,9 @@ import numpy as np
 from mq3drecon.models import Side
 from mq3drecon.streaming.feedback import KeyframeNotice, LiveStatusUpdate, pack_surface_mesh
 from mq3drecon.streaming.framing import read_frame
-from mq3drecon.streaming.messages import ColorFrame, DepthFrame, Heartbeat, Hello, Pose, SessionEnd, SessionStart, decode_message, encode_message
+from mq3drecon.streaming.messages import (
+    ColorFrame, DepthFrame, Heartbeat, Hello, Marker, Pose, RoomModelUpdate, SessionEnd, SessionStart, decode_message, encode_message,
+)
 from mq3drecon.streaming.payloads import decode_depth_ndc
 
 mode, path = sys.argv[1], Path(sys.argv[2])
@@ -33,6 +35,9 @@ if mode == "decode-csharp":
     assert np.isnan(ndc32.ravel()[4]) and abs(ndc32.ravel()[2] - 0.98) < 1e-7
     assert isinstance(heartbeat, Heartbeat) and heartbeat.dropped == {"all": 1}
     assert isinstance(end, SessionEnd) and end.reason == "user_stop"
+    room, marker = messages[8:10]
+    assert isinstance(room, RoomModelUpdate) and room.room["entrance"]["anchor_uuid"] == "d1"
+    assert isinstance(marker, Marker) and marker.kind == "detail" and marker.data == {"start_us": 1793946809031963, "end_us": 1793946811031963}
     print("C# -> Python: OK")
 elif mode == "encode-feedback":
     pose = Pose((0.1, 1.6, -0.2), (0.0, 0.38268343, 0.0, 0.92387953))

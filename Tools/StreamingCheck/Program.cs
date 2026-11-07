@@ -41,6 +41,8 @@ public static class Program
         Put(LiveStreamMessages.Heartbeat(1793946809100, 3, 1));
         Put(LiveStreamMessages.SessionEnd("user_stop", 1));
         Put(LiveStreamMessages.Bye("app_quit"));
+        Put(LiveStreamMessages.RoomModel("{\"version\":1,\"anchors\":[{\"uuid\":\"d1\",\"labels\":[\"DOOR_FRAME\"]}],\"entrance\":{\"anchor_uuid\":\"d1\"}}"));
+        Put(LiveStreamMessages.DetailMarker(1793946809031963, 1793946811031963));
         Console.WriteLine($"encoded 8 messages to {path}");
         return 0;
     }

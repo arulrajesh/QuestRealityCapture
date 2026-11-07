@@ -30,6 +30,8 @@ namespace RealityLog.Streaming
         public const ushort Heartbeat = 5;
         public const ushort SessionEnd = 6;
         public const ushort Bye = 7;
+        public const ushort RoomModel = 8;  // Space Setup room JSON (payload) and the chosen entrance
+        public const ushort Marker = 9;  // operator markers, e.g. a "detail" window
         public const ushort KeyframeNotice = 20;
         public const ushort SurfaceMesh = 21;
         public const ushort Status = 22;

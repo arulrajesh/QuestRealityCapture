@@ -99,6 +99,19 @@ namespace RealityLog.Streaming
             return LiveStreamProtocol.Encode(LiveStreamProtocol.SessionEnd, header, null);
         }
 
+        /// <summary>Room JSON goes in the payload: a large room can exceed the laptop's 64 KB header limit.</summary>
+        public static byte[] RoomModel(string roomJson)
+        {
+            return LiveStreamProtocol.Encode(LiveStreamProtocol.RoomModel, "{\"encoding\":\"json\"}", Encoding.UTF8.GetBytes(roomJson));
+        }
+
+        /// <summary>"Detail here": every color frame in [start, end] (color timestamps, µs) is kept by the laptop.</summary>
+        public static byte[] DetailMarker(long startUs, long endUs)
+        {
+            var header = "{\"kind\":\"detail\",\"start_us\":" + LiveStreamProtocol.Num(startUs) + ",\"end_us\":" + LiveStreamProtocol.Num(endUs) + "}";
+            return LiveStreamProtocol.Encode(LiveStreamProtocol.Marker, header, null);
+        }
+
         public static byte[] Bye(string reason)
         {
             return LiveStreamProtocol.Encode(LiveStreamProtocol.Bye, "{\"reason\":" + LiveStreamProtocol.Str(reason) + "}", null);

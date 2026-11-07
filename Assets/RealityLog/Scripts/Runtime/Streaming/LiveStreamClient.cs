@@ -67,6 +67,12 @@ namespace RealityLog.Streaming
         private long lastSentColorUs;
         private long lastColorPoseUs;
         private Quaternion lastColorRotation = Quaternion.identity;
+        private volatile byte[]? roomModelMessage;
+        private int roomModelVersion;
+        private long detailUntilUs;
+
+        /// <summary>True during a "detail here" burst (A button): the motion gate is off so every frame is sent.</summary>
+        public bool DetailActive => lastColorPoseUs != 0 && lastColorPoseUs <= detailUntilUs;
 
         public static LiveStreamClient Ensure(GameObject host)
         {
@@ -122,6 +128,28 @@ namespace RealityLog.Streaming
             pendingEndReason = null;
             lastSentColorUs = 0;
             sendSignal.Set();  // the network thread announces the session (see RunConnection)
+        }
+
+        /// <summary>Latest Space Setup room (JSON). Sent now if connected, and again on every new connection.</summary>
+        public void SetRoomModel(string roomJson)
+        {
+            roomModelMessage = LiveStreamMessages.RoomModel(roomJson);
+            Interlocked.Increment(ref roomModelVersion);
+            sendSignal.Set();
+        }
+
+        /// <summary>
+        /// "Detail here": for <paramref name="seconds"/>, send every sampled color frame (still not above the
+        /// fps cap or while turning fast) and tell the laptop to keep them all. Main thread; false if not recording.
+        /// </summary>
+        public bool RequestDetail(float seconds)
+        {
+            if (sessionName == null || lastColorPoseUs == 0) return false;
+            var start = lastColorPoseUs;
+            detailUntilUs = start + (long)(seconds * 1e6f);
+            control.Enqueue(LiveStreamMessages.DetailMarker(start, detailUntilUs));
+            sendSignal.Set();
+            return true;
         }
 
         public void EndSession(string reason)
@@ -184,7 +212,8 @@ namespace RealityLog.Streaming
             var moved = Vector3.Distance(position, lastSentPosition) >= Settings.colorMinTranslationM
                         || Quaternion.Angle(rotation, lastSentRotation) >= Settings.colorMinRotationDeg;
             if (lastSentColorUs != 0 && sinceLast < 1f / Mathf.Max(0.1f, Settings.colorMaxFps)) return false;
-            if (lastSentColorUs != 0 && !moved && sinceLast < Settings.colorMaxIntervalS) return false;
+            var detail = timestampUs <= detailUntilUs;
+            if (lastSentColorUs != 0 && !moved && !detail && sinceLast < Settings.colorMaxIntervalS) return false;
             lastSentColorUs = timestampUs;
             lastSentPosition = position;
             lastSentRotation = rotation;
@@ -274,6 +303,7 @@ namespace RealityLog.Streaming
             var stream = tcp.GetStream();
             Write(stream, LiveStreamMessages.Hello(deviceName, appVersion));
             string? announced = null;  // session announced on this connection
+            var sentRoomVersion = -1;  // the room model goes out again on every connection
             connected = true;
             StatusText = $"connected to {Endpoint}";
             var reader = new Thread(() => ReadLoop(stream)) { IsBackground = true, Name = "LiveStreamReader" };
@@ -288,6 +318,13 @@ namespace RealityLog.Streaming
                     // Resume if an earlier connection already announced this session (reconnect after a drop).
                     Write(stream, LiveStreamMessages.SessionStart(current, everAnnounced == current, leftIntrinsics, rightIntrinsics));
                     announced = everAnnounced = current;
+                }
+                var room = roomModelMessage;
+                var version = Volatile.Read(ref roomModelVersion);
+                if (room != null && version != sentRoomVersion)
+                {
+                    Write(stream, room);
+                    sentRoomVersion = version;
                 }
                 while (control.TryDequeue(out var message)) Write(stream, message);
                 while (depthOut.TryDequeue(out var depth)) Write(stream, depth);
